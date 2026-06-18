@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+#
+# ship — smart git push: stage, AI-write the commit message, commit, push.
+#
+set -euo pipefail
+
+NAME="$(basename "$0")"
+
+print_help() {
+  cat <<EOF
+$NAME — smart git push
+
+Usage:
+  $NAME              run the smart-push flow
+  $NAME push         same thing (so "$NAME push" reads naturally)
+  $NAME -n | --dry-run   generate + show the commit message, but don't commit/push
+  $NAME -h | --help
+
+What it does:
+  1. Confirms you're inside a git repo
+  2. Checks for any changes (staged, unstaged, or untracked)
+  3. Stages everything, asks 'claude -p' to write a commit message from the diff
+  4. Commits, then pushes to the current branch
+  5. Prints the commit message and the branch
+EOF
+}
+
+# ----- args -----------------------------------------------------------------
+DRY_RUN=0
+for arg in "$@"; do
+  case "$arg" in
+    push)            ;;                 # accept "$NAME push", treat as no-op flag
+    -n|--dry-run)    DRY_RUN=1 ;;
+    -h|--help)       print_help; exit 0 ;;
+    *)
+      echo "$NAME: unknown argument '$arg' (try --help)" >&2
+      exit 2 ;;
+  esac
+done
+
+# ----- pretty output --------------------------------------------------------
+bold() { printf '\033[1m%s\033[0m\n' "$1"; }
+dim()  { printf '\033[2m%s\033[0m\n' "$1"; }
+err()  { printf '\033[31m%s\033[0m\n' "$1" >&2; }
+
+# ----- 1. must be in a git repo ---------------------------------------------
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  err "Not a git repository (or any parent up to the mount point)."
+  exit 1
+fi
+
+# ----- 2. must have changes -------------------------------------------------
+if [ -z "$(git status --porcelain)" ]; then
+  dim "Nothing to commit — working tree is clean."
+  exit 0
+fi
+
+BRANCH="$(git branch --show-current)"
+[ -z "$BRANCH" ] && BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
+
+# ----- 3. stage everything & collect the diff -------------------------------
+git add -A
+
+# Diff of staged changes. Cap the size so we never blow past the model's input
+# limits on a huge changeset; the summary stat still gives full context.
+DIFF="$(git diff --cached --no-color)"
+STAT="$(git diff --cached --stat --no-color)"
+MAX=60000
+if [ "${#DIFF}" -gt "$MAX" ]; then
+  DIFF="${DIFF:0:$MAX}
+
+[diff truncated — showing first ${MAX} characters of a larger change]"
+fi
+
+# ----- 4. generate the commit message with claude ---------------------------
+bold "Generating commit message…"
+
+PROMPT='You are writing a git commit message. Below is the staged diff (and a summary stat).
+
+Rules:
+- Output ONLY the commit message. No preamble, no explanation, no markdown code fences.
+- Use the Conventional Commits style: a short imperative subject line (<=72 chars),
+  then a blank line, then a brief body of bullet points if the change warrants it.
+- Describe what changed and why, based solely on the diff.
+- Do NOT mention AI, Claude, Anthropic, or that the message was generated.
+
+Summary stat:
+'"$STAT"'
+
+Diff:
+'"$DIFF"
+
+MSG="$(printf '%s' "$PROMPT" | claude -p 2>/dev/null || true)"
+
+# Strip any stray code fences / leading-trailing blank lines, just in case.
+MSG="$(printf '%s\n' "$MSG" | sed -e 's/^```[a-zA-Z]*$//' -e 's/^```$//' | sed -e '/./,$!d' )"
+
+if [ -z "${MSG//[$'\t\r\n ']/}" ]; then
+  err "Could not generate a commit message (claude returned nothing)."
+  err "Your changes are staged; commit manually if you like."
+  exit 1
+fi
+
+echo
+bold "Commit message:"
+printf '%s\n' "$MSG"
+echo
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  dim "Dry run — nothing committed or pushed. (changes remain staged)"
+  exit 0
+fi
+
+# ----- 5. commit ------------------------------------------------------------
+git commit -m "$MSG" >/dev/null
+
+# ----- 6. push to the current branch ----------------------------------------
+bold "Pushing to '$BRANCH'…"
+if git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' >/dev/null 2>&1; then
+  git push
+else
+  # No upstream set yet — set it on first push.
+  git push -u origin "$BRANCH"
+fi
+
+echo
+bold "✓ Pushed to branch: $BRANCH"
