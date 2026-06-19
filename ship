@@ -8,13 +8,19 @@ NAME="$(basename "$0")"
 
 print_help() {
   cat <<EOF
-$NAME — smart git push
+$NAME — smart git push: stage, AI-write the commit message, commit, push.
 
 Usage:
-  $NAME              run the smart-push flow
-  $NAME push         same thing (so "$NAME push" reads naturally)
-  $NAME -n | --dry-run   generate + show the commit message, but don't commit/push
-  $NAME -h | --help
+  $NAME [command] [options]
+
+Commands:
+  (none)            Run the smart-push flow (default)
+  push              Run the smart-push flow ("$NAME push" reads naturally)
+  help              Show this help
+
+Options:
+  -n, --dry-run     Generate + show the commit message, but don't commit/push
+  -h, --help        Show this help
 
 What it does:
   1. Confirms you're inside a git repo
@@ -31,7 +37,7 @@ for arg in "$@"; do
   case "$arg" in
     push)            ;;                 # accept "$NAME push", treat as no-op flag
     -n|--dry-run)    DRY_RUN=1 ;;
-    -h|--help)       print_help; exit 0 ;;
+    help|-h|--help)  print_help; exit 0 ;;
     *)
       echo "$NAME: unknown argument '$arg' (try --help)" >&2
       exit 2 ;;
