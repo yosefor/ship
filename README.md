@@ -27,6 +27,28 @@ Pushing to 'main'…
 
 The generated message never mentions AI, Claude, or any tooling — it just describes your change.
 
+## Review before you ship
+
+Add `--review` (or `-r`) to have the `claude` CLI review the staged diff **before** anything is committed or pushed. It only pushes if the review passes; otherwise it prints what to change and stops — your changes stay staged.
+
+```console
+$ ship --review
+Reviewing changes…
+
+✗ Review requested changes — not pushing.
+
+- config.js: Remove the hard-coded AWS_SECRET_KEY on line 12 — never commit secrets.
+- api.js: console.log(password) on line 40 is a debugging leftover; remove it.
+
+Your changes are staged. Address the above, then run 'ship' again.
+```
+
+When the review passes, `ship --review` continues straight into the normal commit-and-push flow.
+
+The review flags real problems — bugs, security issues, leaked secrets, debugging leftovers, and broken code — and won't block on style nitpicks or missing tests alone. It defaults to *not* pushing: anything other than a clear pass stops the flow, and the exit code is non-zero so CI and scripts can detect it.
+
+Use `ship review` (the bare command) to **review only** — it runs the review and stops regardless of the verdict, never committing or pushing.
+
 ## Requirements
 
 - **git**
@@ -60,6 +82,8 @@ ln -s "$PWD/ship" ~/.local/bin/ship   # or any dir on your PATH
 ```
 ship              Run the smart-push flow
 ship push         Same thing (reads naturally)
+ship -r           Review the diff first; only push if it passes (--review)
+ship review       Review only — never commit or push
 ship -n           Dry run: generate + show the message, but don't commit/push
 ship --help       Show help
 ```
