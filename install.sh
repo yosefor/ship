@@ -19,9 +19,9 @@ dim()  { printf '\033[2m%s\033[0m\n' "$1"; }
 err()  { printf '\033[31m%s\033[0m\n' "$1" >&2; }
 
 command -v git >/dev/null 2>&1 || { err "git is required but not found."; exit 1; }
-if ! command -v claude >/dev/null 2>&1; then
-  dim "Note: the 'claude' CLI (Claude Code) was not found on your PATH."
-  dim "ship needs it to generate commit messages — install it from https://claude.com/claude-code"
+if ! command -v claude >/dev/null 2>&1 && ! command -v codex >/dev/null 2>&1; then
+  dim "Note: neither 'claude' nor 'codex' was found on your PATH."
+  dim "ship needs one of them to generate commit messages."
 fi
 
 bold "Installing ship to $TARGET"

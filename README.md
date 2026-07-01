@@ -4,7 +4,7 @@ Smart `git push`: stage your changes, let AI write the commit message from the d
 
 ```console
 $ ship
-Generating commit message…
+Generating commit message with claude…
 
 Commit message:
 feat: add sub() function for subtraction
@@ -21,11 +21,34 @@ Pushing to 'main'…
 
 1. Confirms you're inside a git repo.
 2. Checks for changes (staged, unstaged, or untracked) — no-ops if the tree is clean.
-3. Stages everything (`git add -A`) and asks the [`claude`](https://claude.com/claude-code) CLI to write a [Conventional Commits](https://www.conventionalcommits.org/) message from the diff.
+3. Stages everything (`git add -A`) and asks the selected commit model to write a [Conventional Commits](https://www.conventionalcommits.org/) message from the diff. The default is [`claude`](https://claude.com/claude-code), and you can switch it to [`codex`](https://developers.openai.com/codex/cli/).
 4. Commits, then pushes to the current branch (sets the upstream automatically on the first push).
 5. Prints the commit message and the branch.
 
-The generated message never mentions AI, Claude, or any tooling — it just describes your change.
+The generated message never mentions AI, Claude, Codex, or any tooling — it just describes your change.
+
+## Commit model
+
+`ship` uses Claude for commit messages by default. To make Codex the default:
+
+```bash
+ship config commit-model codex
+```
+
+To switch back:
+
+```bash
+ship config commit-model claude
+```
+
+You can also override the commit model for one run:
+
+```bash
+ship --commit-model codex
+ship --commit-model claude
+```
+
+For scripts, `SHIP_COMMIT_MODEL=codex ship` works too. Supported values are `claude` and `codex`.
 
 ## Review before you ship
 
@@ -52,7 +75,7 @@ Use `ship review` (the bare command) to **review only** — it runs the review a
 ## Requirements
 
 - **git**
-- **[Claude Code](https://claude.com/claude-code)** — the `claude` CLI must be installed and on your `PATH` (used to generate the message).
+- **[Claude Code](https://claude.com/claude-code)** or **[Codex CLI](https://developers.openai.com/codex/cli/)** — install the CLI for whichever commit model you use.
 
 ## Install
 
@@ -85,6 +108,10 @@ ship push         Same thing (reads naturally)
 ship -r           Review the diff first; only push if it passes (--review)
 ship review       Review only — never commit or push
 ship -n           Dry run: generate + show the message, but don't commit/push
+ship --commit-model codex
+                  Use Codex for this run's commit message
+ship config commit-model codex
+                  Use Codex by default for commit messages
 ship --help       Show help
 ```
 
