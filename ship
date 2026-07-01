@@ -197,6 +197,35 @@ generate_commit_message() {
   esac
 }
 
+sanitize_commit_message() {
+  sed -e 's/^```[a-zA-Z]*$//' -e 's/^```$//' | awk '
+    function ltrim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      return value
+    }
+    function is_conventional_subject(value) {
+      return value ~ /^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([^)]+\))?!?:[[:space:]]+/
+    }
+    {
+      lines[NR] = $0
+      clean = ltrim($0)
+      if (!first_nonempty && clean != "") {
+        first_nonempty = NR
+      }
+      if (!start && is_conventional_subject(clean)) {
+        start = NR
+      }
+    }
+    END {
+      if (start) {
+        for (i = start; i <= NR; i++) print lines[i]
+      } else if (first_nonempty) {
+        for (i = first_nonempty; i <= NR; i++) print lines[i]
+      }
+    }
+  '
+}
+
 # ----- update check ---------------------------------------------------------
 # Fetches the latest version at most once per day and, if a newer one exists,
 # prints a red notice with the update command. Always silent on any failure so
@@ -363,10 +392,7 @@ Summary stat:
 Diff:
 '"$DIFF"
 
-MSG="$(generate_commit_message "$PROMPT")"
-
-# Strip any stray code fences / leading-trailing blank lines, just in case.
-MSG="$(printf '%s\n' "$MSG" | sed -e 's/^```[a-zA-Z]*$//' -e 's/^```$//' | sed -e '/./,$!d' )"
+MSG="$(generate_commit_message "$PROMPT" | sanitize_commit_message)"
 
 if [ -z "${MSG//[$'\t\r\n ']/}" ]; then
   err "Could not generate a commit message ($COMMIT_MODEL returned nothing)."
