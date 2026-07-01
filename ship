@@ -7,7 +7,7 @@ set -euo pipefail
 NAME="$(basename "$0")"
 
 # Bump this on every release so installed copies can detect a newer version.
-SHIP_VERSION="1.0.0"
+SHIP_VERSION="1.0.1"
 REPO_RAW="https://raw.githubusercontent.com/yosefor/ship/main/ship"
 INSTALL_CMD="curl -fsSL https://raw.githubusercontent.com/yosefor/ship/main/install.sh | bash"
 SHIP_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/ship"
