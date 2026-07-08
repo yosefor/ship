@@ -246,6 +246,24 @@ normalize_editor_app() {
   esac
 }
 
+detect_editor_from_env() {
+  local editor_env
+  editor_env="$(env 2>/dev/null | grep -E '^((VSCODE|CURSOR)[_A-Z0-9]*|TERM_PROGRAM|TERM_PROGRAM_VERSION|__CFBundleIdentifier)=' || true)"
+
+  case "$editor_env" in
+    *"Cursor.app"*|*"/Cursor/"*)
+      printf '%s\n' "Cursor"
+      return 0
+      ;;
+    *"Visual Studio Code.app"*|*"/Visual Studio Code/"*)
+      printf '%s\n' "Visual Studio Code"
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
 detect_editor_from_process_tree() {
   local pid args ppid
   pid="$$"
@@ -269,6 +287,16 @@ detect_editor_from_process_tree() {
   done
 
   return 1
+}
+
+detect_editor_from_frontmost_app() {
+  command -v osascript >/dev/null 2>&1 || return 1
+
+  local frontmost
+  frontmost="$(osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true' 2>/dev/null || true)"
+  [ -n "$frontmost" ] || return 1
+
+  normalize_editor_app "$frontmost"
 }
 
 is_editor_running() {
@@ -296,7 +324,19 @@ resolve_editor_app_to_close() {
     return 0
   fi
 
+  detected="$(detect_editor_from_env || true)"
+  if [ -n "$detected" ]; then
+    printf '%s\n' "$detected"
+    return 0
+  fi
+
   detected="$(detect_editor_from_process_tree || true)"
+  if [ -n "$detected" ]; then
+    printf '%s\n' "$detected"
+    return 0
+  fi
+
+  detected="$(detect_editor_from_frontmost_app || true)"
   if [ -n "$detected" ]; then
     printf '%s\n' "$detected"
     return 0
