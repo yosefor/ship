@@ -7,7 +7,7 @@ set -euo pipefail
 NAME="$(basename "$0")"
 
 # Bump this on every release so installed copies can detect a newer version.
-SHIP_VERSION="1.0.1"
+SHIP_VERSION="1.0.3"
 REPO_RAW="https://raw.githubusercontent.com/yosefor/ship/main/ship"
 INSTALL_CMD="curl -fsSL https://raw.githubusercontent.com/yosefor/ship/main/install.sh | bash"
 SHIP_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/ship"
@@ -29,6 +29,7 @@ Usage:
 Commands:
   (none)            Run the smart-push flow (default)
   push              Run the smart-push flow ("$NAME push" reads naturally)
+  exit              Run the smart-push flow, then close this editor window
   review            Review the changes only; never commit or push
   config            Read or write ship defaults
   help              Show this help
@@ -37,6 +38,7 @@ Options:
   -n, --dry-run     Generate + show the commit message, but don't commit/push
   -r, --review      Have 'claude -p' review the diff first; only push if it
                     passes. Otherwise print what to change and stop.
+      --exit-editor Close this Cursor or VS Code window after a successful push.
       --commit-model <claude|codex>
                     Choose the commit message generator for this run.
   -h, --help        Show this help
@@ -54,6 +56,7 @@ What it does:
      if it's not ready for prod
   5. Commits, then pushes to the current branch
   6. Prints the commit message and the branch
+  7. (with exit/--exit-editor) closes this editor window after the push succeeds
 EOF
 }
 
@@ -129,6 +132,7 @@ EOF
 DRY_RUN=0
 REVIEW=0
 REVIEW_ONLY=0
+EXIT_EDITOR=0
 COMMIT_MODEL_OVERRIDE=""
 if [ "${1:-}" = "config" ]; then
   shift
@@ -140,9 +144,11 @@ while [ "$#" -gt 0 ]; do
   arg="$1"
   case "$arg" in
     push)                 ;;                 # accept "$NAME push", treat as no-op flag
+    exit|quit)            EXIT_EDITOR=1 ;;   # "$NAME exit" — push, then close this editor window
     review)               REVIEW=1; REVIEW_ONLY=1 ;;   # "$NAME review" — review, never push
     -n|--dry-run)         DRY_RUN=1 ;;
     -r|--review)          REVIEW=1 ;;
+    --exit-editor)        EXIT_EDITOR=1 ;;
     --commit-model)
       [ "$#" -gt 1 ] || { err "$NAME: --commit-model requires 'claude' or 'codex'."; exit 2; }
       COMMIT_MODEL_OVERRIDE="$(normalize_commit_model "$2")"
@@ -224,6 +230,116 @@ sanitize_commit_message() {
       }
     }
   '
+}
+
+normalize_editor_app() {
+  case "$1" in
+    Cursor|cursor)
+      printf '%s\n' "Cursor"
+      ;;
+    Code|code|vscode|VSCode|"VS Code"|"vs code"|"Visual Studio Code")
+      printf '%s\n' "Visual Studio Code"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+detect_editor_from_process_tree() {
+  local pid args ppid
+  pid="$$"
+
+  while [ -n "$pid" ] && [ "$pid" != "0" ] && [ "$pid" != "1" ]; do
+    args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+    case "$args" in
+      *"Cursor.app"*|*"Cursor Helper"*)
+        printf '%s\n' "Cursor"
+        return 0
+        ;;
+      *"Visual Studio Code.app"*|*"Code Helper"*)
+        printf '%s\n' "Visual Studio Code"
+        return 0
+        ;;
+    esac
+
+    ppid="$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d ' ' || true)"
+    [ "$ppid" != "$pid" ] || break
+    pid="$ppid"
+  done
+
+  return 1
+}
+
+is_editor_running() {
+  command -v pgrep >/dev/null 2>&1 || return 1
+
+  case "$1" in
+    Cursor)
+      pgrep -x Cursor >/dev/null 2>&1 || pgrep -f "/Cursor.app/" >/dev/null 2>&1
+      ;;
+    "Visual Studio Code")
+      pgrep -x Code >/dev/null 2>&1 || pgrep -f "/Visual Studio Code.app/" >/dev/null 2>&1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+resolve_editor_app_to_close() {
+  local configured detected cursor_running code_running
+
+  configured="${SHIP_EXIT_EDITOR_APP:-}"
+  if [ -n "$configured" ]; then
+    normalize_editor_app "$configured" || return 2
+    return 0
+  fi
+
+  detected="$(detect_editor_from_process_tree || true)"
+  if [ -n "$detected" ]; then
+    printf '%s\n' "$detected"
+    return 0
+  fi
+
+  cursor_running=0
+  code_running=0
+  is_editor_running "Cursor" && cursor_running=1
+  is_editor_running "Visual Studio Code" && code_running=1
+
+  if [ "$cursor_running" -eq 1 ] && [ "$code_running" -eq 0 ]; then
+    printf '%s\n' "Cursor"
+    return 0
+  fi
+  if [ "$code_running" -eq 1 ] && [ "$cursor_running" -eq 0 ]; then
+    printf '%s\n' "Visual Studio Code"
+    return 0
+  fi
+
+  return 1
+}
+
+close_editor_window_after_push() {
+  [ "$EXIT_EDITOR" -eq 1 ] || return 0
+
+  if ! command -v osascript >/dev/null 2>&1; then
+    err "Could not close editor window: osascript was not found."
+    return 0
+  fi
+
+  local app
+  if ! app="$(resolve_editor_app_to_close)"; then
+    err "Could not decide which editor window to close."
+    err "Set SHIP_EXIT_EDITOR_APP=Cursor or SHIP_EXIT_EDITOR_APP='Visual Studio Code'."
+    return 0
+  fi
+
+  dim "Closing current $app window…"
+  if osascript -e "tell application \"$app\" to close front window" >/dev/null 2>&1; then
+    green "✓ Closed current $app window"
+  else
+    err "Could not close current $app window."
+  fi
 }
 
 # ----- update check ---------------------------------------------------------
@@ -424,3 +540,4 @@ fi
 
 echo
 bold "✓ Pushed to branch: $BRANCH"
+close_editor_window_after_push

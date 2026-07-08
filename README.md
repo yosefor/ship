@@ -105,9 +105,12 @@ ln -s "$PWD/ship" ~/.local/bin/ship   # or any dir on your PATH
 ```
 ship              Run the smart-push flow
 ship push         Same thing (reads naturally)
+ship exit         Run the smart-push flow, then close this editor window
 ship -r           Review the diff first; only push if it passes (--review)
 ship review       Review only — never commit or push
 ship -n           Dry run: generate + show the message, but don't commit/push
+ship --exit-editor
+                  Close this Cursor or VS Code window after a successful push
 ship --commit-model codex
                   Use Codex for this run's commit message
 ship config commit-model codex
@@ -119,6 +122,7 @@ ship --help       Show help
 
 - `ship` stages **everything** (`git add -A`) before committing.
 - The first push to a new branch runs `git push -u origin <branch>` to set the upstream; later pushes use plain `git push`.
+- `ship exit` and `ship --exit-editor` close only the current Cursor or VS Code window after `git push` succeeds. If both are open and `ship` cannot tell which terminal launched it, set `SHIP_EXIT_EDITOR_APP=Cursor` or `SHIP_EXIT_EDITOR_APP='Visual Studio Code'`.
 - Very large diffs (>60k chars) are truncated before being sent to the model; a `--stat` summary is always included so the message still reflects the whole change.
 
 ## License
