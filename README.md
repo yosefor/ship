@@ -68,23 +68,30 @@ ship --model gpt-5.6-terra
 
 ## Review before you ship
 
-Add `--review` (or `-r`) to have Codex review the staged diff **before** anything is committed or pushed. Reviews use `gpt-5.6-terra` at **high** reasoning effort by default. It only pushes if the review passes; otherwise it prints what to change and stops — your changes stay staged.
+Add `--review` (or `-r`) to have Codex thoroughly review the staged diff **before** anything is committed or pushed. Reviews use `gpt-5.6-terra` at **high** reasoning effort by default and are asked to find every real production issue they can identify, not just the first one.
 
 ```console
 $ ship --review
 Reviewing changes…
 
-✗ Review requested changes — not pushing.
+✗ Review requested changes — not pushing yet.
 
 - config.js: Remove the hard-coded AWS_SECRET_KEY on line 12 — never commit secrets.
 - api.js: console.log(password) on line 40 is a debugging leftover; remove it.
 
-Your changes are staged. Address the above, then run 'ship' again.
+Choose how to continue:
+› Push anyway
+  Fix once with codex, then review again
+  Fix and review until approved with codex
+
+Use ↑/↓ and Enter, or click an option in a compatible terminal.
 ```
+
+When a review requests changes, `ship -r` presents an arrow-key menu (with click support in compatible terminals). You can deliberately push anyway, fix once with your configured default commit model (`codex` or `claude`) and review again, or keep fixing and reviewing until Codex approves the diff. The fixes are staged before every repeat review. If an automatic fixer makes no staged changes, the menu returns so it cannot loop forever. In a non-interactive shell, it keeps the safe behavior: it stops with the changes staged.
 
 When the review passes, `ship --review` continues straight into the normal commit-and-push flow.
 
-The review flags real problems — bugs, security issues, leaked secrets, debugging leftovers, and broken code — and won't block on style nitpicks or missing tests alone. It defaults to *not* pushing: anything other than a clear pass stops the flow, and the exit code is non-zero so CI and scripts can detect it.
+The review flags real problems — bugs, security issues, leaked secrets, debugging leftovers, and broken code — and won't block on style nitpicks or missing tests alone. `ship review` and non-interactive `ship -r` default to *not* pushing: anything other than a clear pass stops the flow, and the exit code is non-zero so CI and scripts can detect it.
 
 Use `ship review` (the bare command) to **review only** — it runs the review and stops regardless of the verdict, never committing or pushing.
 
@@ -131,7 +138,8 @@ ln -s "$PWD/ship" ~/.local/bin/ship   # or any dir on your PATH
 ship              Run the smart-push flow
 ship push         Same thing (reads naturally)
 ship exit         Run the smart-push flow, then close this editor window
-ship -r           Review the diff first; only push if it passes (--review)
+ship -r           Review the diff first; on findings choose push, fix once, or
+                  auto-fix and re-review until it passes
 ship review       Review only — never commit or push
 ship -n           Dry run: generate + show the message, but don't commit/push
 ship --exit-editor

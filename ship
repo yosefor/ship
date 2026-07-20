@@ -7,7 +7,7 @@ set -euo pipefail
 NAME="$(basename "$0")"
 
 # Bump this on every release so installed copies can detect a newer version.
-SHIP_VERSION="1.1.0"
+SHIP_VERSION="1.1.2"
 REPO_RAW="https://raw.githubusercontent.com/yosefor/ship/main/ship"
 INSTALL_CMD="curl -fsSL https://raw.githubusercontent.com/yosefor/ship/main/install.sh | bash"
 SHIP_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/ship"
@@ -36,8 +36,8 @@ Commands:
 
 Options:
   -n, --dry-run     Generate + show the commit message, but don't commit/push
-  -r, --review      Have Codex review the diff first; only push if it
-                    passes. Otherwise print what to change and stop.
+  -r, --review      Have Codex review the diff first. If it finds issues,
+                    choose to push, fix once, or auto-fix until it passes.
       --exit-editor Close this Cursor or VS Code window after a successful push.
       --commit-model <claude|codex>
                     Choose the commit message generator for this run.
@@ -61,8 +61,9 @@ What it does:
   1. Confirms you're inside a git repo
   2. Checks for any changes (staged, unstaged, or untracked)
   3. Stages everything, asks the selected model to write a commit message
-  4. (with --review) asks Codex to review the diff at high reasoning effort;
-     stops with feedback if it's not ready for prod
+  4. (with --review) asks Codex to thoroughly review the diff at high reasoning
+     effort; if it blocks the push, choose to push anyway, fix once, or have
+     your default Codex/Claude model fix and re-review until it passes
   5. Commits, then pushes to the current branch
   6. Prints the commit message and the branch
   7. (with exit/--exit-editor) closes this editor window after the push succeeds
@@ -538,29 +539,28 @@ BRANCH="$(git branch --show-current)"
 [ -z "$BRANCH" ] && BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
 
 # ----- 3. stage everything & collect the diff -------------------------------
-git add -A
+collect_staged_diff() {
+  # Cap the diff so we never blow past the model's input limits on a huge
+  # changeset; the summary stat still gives full context.
+  DIFF="$(git diff --cached --no-color)"
+  STAT="$(git diff --cached --stat --no-color)"
+  local max=60000
+  if [ "${#DIFF}" -gt "$max" ]; then
+    DIFF="${DIFF:0:$max}
 
-# Diff of staged changes. Cap the size so we never blow past the model's input
-# limits on a huge changeset; the summary stat still gives full context.
-DIFF="$(git diff --cached --no-color)"
-STAT="$(git diff --cached --stat --no-color)"
-MAX=60000
-if [ "${#DIFF}" -gt "$MAX" ]; then
-  DIFF="${DIFF:0:$MAX}
+[diff truncated — showing first ${max} characters of a larger change]"
+  fi
+}
 
-[diff truncated — showing first ${MAX} characters of a larger change]"
-fi
+run_review() {
+  local review_out_file
 
-# ----- 3b. (optional) review the diff before going further ------------------
-# Asks Codex to act as a reviewer and decide whether the change is safe to
-# ship. The first line of its answer is a machine-readable verdict; the rest is
-# human-facing feedback. We only continue to commit/push on a clear pass.
-if [ "$REVIEW" -eq 1 ]; then
-  bold "Reviewing changes…"
-
-  REVIEW_PROMPT='You are a senior engineer doing a pre-push code review of a staged git diff.
+  REVIEW_PROMPT='You are a senior engineer doing a thorough pre-push code review of a staged git diff.
 Decide whether this change is safe and ready to ship to production.
 
+Inspect the whole diff and its likely interactions carefully. Find every real
+production-affecting issue you can identify; do not stop after finding the
+first issue or provide only representative examples.
 Look for: bugs, logic errors, security issues, leaked secrets, debugging
 leftovers (stray prints/console logs/commented-out code), obviously broken or
 incomplete code, and anything that would clearly break production.
@@ -572,7 +572,7 @@ Output format (STRICT):
   pushed as-is.
 - After that first line, write concise feedback for the developer:
   * If APPROVE, a one-line summary is enough.
-  * If CHANGES, list each problem as a bullet ("- ...") with the file/area and
+  * If CHANGES, list every problem as a bullet ("- ...") with the file/area and
     what to change. Be specific and actionable.
 - Do NOT use markdown code fences. Do NOT mention AI, Claude, or Anthropic.
 
@@ -585,7 +585,7 @@ Diff:
   command -v codex >/dev/null 2>&1 || {
     err "Could not get a review: 'codex' was not found on your PATH."
     err "Install Codex CLI, or review/commit manually."
-    exit 1
+    return 1
   }
 
   review_out_file="$(mktemp)"
@@ -599,32 +599,203 @@ Diff:
     --output-last-message "$review_out_file" \
     - >/dev/null 2>/dev/null; then
     rm -f "$review_out_file"
-    true
+    REVIEW_OUT=""
+    return 1
   fi
   REVIEW_OUT="$(cat "$review_out_file" 2>/dev/null || true)"
   rm -f "$review_out_file"
 
-  if [ -z "${REVIEW_OUT//[$'\t\r\n ']/}" ]; then
-    err "Could not get a review (Codex returned nothing)."
-    err "Your changes are staged; review/commit manually if you like."
-    exit 1
+  [ -n "${REVIEW_OUT//[$'\t\r\n ']/}" ]
+}
+
+choose_review_resolution() {
+  REVIEW_ACTION="abort"
+
+  if [ ! -t 0 ] && [ ! -t 1 ]; then
+    dim "Non-interactive session — leaving the reviewed changes staged."
+    return 0
   fi
 
-  # First non-empty line carries the verdict; the rest is the feedback body.
-  VERDICT="$(printf '%s\n' "$REVIEW_OUT" | sed -e '/./,$!d' | head -n1)"
-  FEEDBACK="$(printf '%s\n' "$REVIEW_OUT" | sed -e '/./,$!d' | tail -n +2 | sed -e '/./,$!d')"
+  local -a options=(
+    "Push anyway"
+    "Fix once with ${COMMIT_MODEL}, then review again"
+    "Fix and review until approved with ${COMMIT_MODEL}"
+  )
+  local selected=0 menu_row=0 mouse_enabled=0 key next mouse_payload button row
 
-  echo
-  if [ "$VERDICT" = "VERDICT: APPROVE" ]; then
-    green "✓ Review passed — change looks ready to ship."
-    [ -n "${FEEDBACK//[$'\t\r\n ']/}" ] && printf '%s\n' "$FEEDBACK"
-    echo
-    if [ "$REVIEW_ONLY" -eq 1 ]; then
-      dim "Review only — nothing committed or pushed. (changes remain staged)"
-      exit 0
+  render_review_options() {
+    local index
+    for index in "${!options[@]}"; do
+      printf '\r\033[2K'
+      if [ "$index" -eq "$selected" ]; then
+        printf '\033[7m› %s\033[0m\n' "${options[$index]}"
+      else
+        printf '  %s\n' "${options[$index]}"
+      fi
+    done
+  }
+
+  finish_review_menu() {
+    [ "$mouse_enabled" -eq 1 ] && printf '\033[?1000l\033[?1006l'
+    printf '\033[?25h'
+  }
+
+  echo "Choose how to continue (↑/↓ + Enter, or click in a compatible terminal):"
+  # Xterm-compatible terminals report the cursor position and mouse clicks.
+  # Arrow-key selection remains available when either capability is absent.
+  printf '\033[6n'
+  if IFS= read -rsd R -t 1 next </dev/tty && [[ "$next" =~ ^$'\033'\[([0-9]+)\;[0-9]+$ ]]; then
+    menu_row="${BASH_REMATCH[1]}"
+    printf '\033[?1000h\033[?1006h'
+    mouse_enabled=1
+  fi
+  render_review_options
+
+  while :; do
+    if ! IFS= read -rsn1 key </dev/tty; then
+      finish_review_menu
+      dim "Could not read a selection — leaving the reviewed changes staged."
+      return 0
     fi
-  else
-    err "✗ Review requested changes — not pushing."
+
+    case "$key" in
+      '')
+        case "$selected" in
+          0) REVIEW_ACTION="push_anyway" ;;
+          1) REVIEW_ACTION="fix_once" ;;
+          2) REVIEW_ACTION="fix_until_approved" ;;
+        esac
+        finish_review_menu
+        return 0
+        ;;
+      $'\033')
+        IFS= read -rsn1 -t 1 next </dev/tty || continue
+        [ "$next" = "[" ] || continue
+        IFS= read -rsn1 -t 1 next </dev/tty || continue
+        case "$next" in
+          A)
+            selected=$(( (selected + ${#options[@]} - 1) % ${#options[@]} ))
+            printf '\033[3A'
+            render_review_options
+            ;;
+          B)
+            selected=$(( (selected + 1) % ${#options[@]} ))
+            printf '\033[3A'
+            render_review_options
+            ;;
+          '<')
+            mouse_payload=""
+            while IFS= read -rsn1 -t 1 next </dev/tty; do
+              [ "$next" = "M" ] || [ "$next" = "m" ] && break
+              mouse_payload+="$next"
+            done
+            IFS=';' read -r button _ row <<< "$mouse_payload"
+            if [ "$button" = "0" ] && [ "$row" -ge "$menu_row" ] && [ "$row" -lt $((menu_row + ${#options[@]})) ]; then
+              selected=$((row - menu_row))
+              printf '\033[3A'
+              render_review_options
+              case "$selected" in
+                0) REVIEW_ACTION="push_anyway" ;;
+                1) REVIEW_ACTION="fix_once" ;;
+                2) REVIEW_ACTION="fix_until_approved" ;;
+              esac
+              finish_review_menu
+              return 0
+            fi
+            ;;
+        esac
+        ;;
+    esac
+  done
+}
+
+fix_review_issues() {
+  local fix_prompt
+  fix_prompt='You are fixing a failed pre-push code review in the current repository.
+Work directly in the working tree. Inspect the reported issues and the affected
+code, then implement every necessary fix. Keep the change focused; do not
+change unrelated code. Run relevant validation when practical.
+
+Do not create a commit, do not push, and do not merely describe a solution:
+make the edits in the working tree.
+
+Review feedback:
+'"$FEEDBACK"'
+
+Reviewed diff summary:
+'"$STAT"'
+
+Reviewed diff:
+'"$DIFF"
+
+  bold "Fixing review issues with ${COMMIT_MODEL}…"
+  case "$COMMIT_MODEL" in
+    codex)
+      command -v codex >/dev/null 2>&1 || {
+        err "Could not fix review issues: 'codex' was not found on your PATH."
+        return 1
+      }
+      printf '%s' "$fix_prompt" | codex exec \
+        --sandbox workspace-write \
+        -c approval_policy='"never"' \
+        --model "$CODEX_MODEL" \
+        --ephemeral \
+        --color never \
+        -
+      ;;
+    claude)
+      command -v claude >/dev/null 2>&1 || {
+        err "Could not fix review issues: 'claude' was not found on your PATH."
+        return 1
+      }
+      claude -p --permission-mode acceptEdits "$fix_prompt"
+      ;;
+  esac
+}
+
+git add -A
+collect_staged_diff
+
+# ----- 3b. (optional) review the diff before going further ------------------
+# A failed review can either be deliberately overridden or fixed by the user's
+# configured default commit model. Fixes are staged and reviewed again before a
+# push is allowed.
+if [ "$REVIEW" -eq 1 ]; then
+  AUTO_FIX_UNTIL_APPROVED=0
+  while :; do
+    bold "Reviewing changes…"
+    if ! run_review; then
+      err "Could not get a review (Codex returned nothing)."
+      err "Your changes are staged; review/commit manually if you like."
+      exit 1
+    fi
+
+    # First non-empty line carries the verdict; the rest is the feedback body.
+    VERDICT="$(printf '%s\n' "$REVIEW_OUT" | sed -e '/./,$!d' | head -n1)"
+    FEEDBACK="$(printf '%s\n' "$REVIEW_OUT" | sed -e '/./,$!d' | tail -n +2 | sed -e '/./,$!d')"
+
+    echo
+    if [ "$VERDICT" = "VERDICT: APPROVE" ]; then
+      green "✓ Review passed — change looks ready to ship."
+      [ -n "${FEEDBACK//[$'\t\r\n ']/}" ] && printf '%s\n' "$FEEDBACK"
+      echo
+      if [ "$REVIEW_ONLY" -eq 1 ]; then
+        dim "Review only — nothing committed or pushed. (changes remain staged)"
+        exit 0
+      fi
+      break
+    fi
+
+    # Keep the exact verdict contract safe: only an explicit CHANGES verdict
+    # gets the interactive override/fix choices.
+    if [ "$VERDICT" != "VERDICT: CHANGES" ]; then
+      err "Review returned an invalid verdict — not pushing."
+      printf '%s\n' "$REVIEW_OUT"
+      dim "Your changes are staged; run '$NAME -r' again or review manually."
+      exit 1
+    fi
+
+    err "✗ Review requested changes — not pushing yet."
     echo
     if [ -n "${FEEDBACK//[$'\t\r\n ']/}" ]; then
       printf '%s\n' "$FEEDBACK"
@@ -632,10 +803,53 @@ Diff:
       printf '%s\n' "$REVIEW_OUT"
     fi
     echo
-    dim "Your changes are staged. Address the above, then run '$NAME' again."
-    # Non-zero so scripts/CI can tell the review didn't pass.
-    exit 1
-  fi
+
+    if [ "$REVIEW_ONLY" -eq 1 ]; then
+      dim "Review only — nothing committed or pushed. (changes remain staged)"
+      exit 1
+    fi
+
+    if [ "$AUTO_FIX_UNTIL_APPROVED" -eq 1 ]; then
+      bold "Review still requested changes — fixing and reviewing again…"
+      REVIEW_ACTION="fix_once"
+    else
+      choose_review_resolution
+    fi
+    case "$REVIEW_ACTION" in
+      push_anyway)
+        bold "Continuing without resolving the review findings…"
+        echo
+        break
+        ;;
+      fix_once|fix_until_approved)
+        if [ "$REVIEW_ACTION" = "fix_until_approved" ]; then
+          AUTO_FIX_UNTIL_APPROVED=1
+        fi
+        BEFORE_FIX_FINGERPRINT="$(git diff --cached --no-color | cksum)"
+        if ! fix_review_issues; then
+          err "The fixer could not complete. Your changes are staged."
+          exit 1
+        fi
+        git add -A
+        if git diff --cached --quiet; then
+          dim "The fixer left no changes to commit or push."
+          exit 0
+        fi
+        AFTER_FIX_FINGERPRINT="$(git diff --cached --no-color | cksum)"
+        if [ "$AUTO_FIX_UNTIL_APPROVED" -eq 1 ] && [ "$BEFORE_FIX_FINGERPRINT" = "$AFTER_FIX_FINGERPRINT" ]; then
+          err "The auto-fixer made no staged changes; returning to the choices."
+          AUTO_FIX_UNTIL_APPROVED=0
+        fi
+        collect_staged_diff
+        echo
+        ;;
+      *)
+        dim "Your changes are staged. Address the above, then run '$NAME' again."
+        # Non-zero so scripts/CI can tell the review didn't pass.
+        exit 1
+        ;;
+    esac
+  done
 fi
 
 # If we were asked to review only, we should never reach the push flow.
